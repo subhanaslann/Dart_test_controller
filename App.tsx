@@ -2,8 +2,14 @@ import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { CodeEditor } from './components/CodeEditor';
 import { CoverageChart } from './components/CoverageChart';
 import { RepoExplorer } from './components/RepoExplorer';
+import { OAuthButton } from './components/OAuthButton';
+import { OAuthModal } from './components/OAuthModal';
+import { OAuthPanel } from './components/OAuthPanel';
+import { OAuthNotification, NotificationType } from './components/OAuthNotification';
 import { analyzeFlutterCoverageStatic, generateMissingTestsStatic } from './services/analysisEngine';
 import { GithubService, parseRepoUrl } from './services/githubService';
+import { oauthService } from './services/oauthService';
+import { GITHUB_PERMISSIONS, APP_METADATA, isOAuthConfigured } from './services/oauthConfig';
 import { AnalysisReport, AnalysisStatus, GeneratedTestResponse, RepoStructure, FilePair, PackageDependencies, DeepAnalysisContext, FunctionMetadata } from './types';
 
 const Icons = {
@@ -62,6 +68,16 @@ export default function App() {
     const [deepScanEnabled, setDeepScanEnabled] = useState(false);
     const [deepContext, setDeepContext] = useState<DeepAnalysisContext | undefined>(undefined);
 
+    // OAuth State
+    const [isOAuthModalOpen, setIsOAuthModalOpen] = useState(false);
+    const [isAuthenticated, setIsAuthenticated] = useState(false);
+    const [isOAuthLoading, setIsOAuthLoading] = useState(false);
+
+    // Notification State
+    const [notificationVisible, setNotificationVisible] = useState(false);
+    const [notificationType, setNotificationType] = useState<NotificationType>('info');
+    const [notificationMessage, setNotificationMessage] = useState('');
+
     // Code & Analysis State
     const [prodCode, setProdCode] = useState<string>('');
     const [testCode, setTestCode] = useState<string>('');
@@ -82,6 +98,13 @@ export default function App() {
         const storedRepo = localStorage.getItem('sentinel_gh_repo');
         if (storedToken) setGhToken(storedToken);
         if (storedRepo) setRepoUrl(storedRepo);
+
+        // Check OAuth authentication
+        setIsAuthenticated(oauthService.isAuthenticated());
+        if (oauthService.isAuthenticated()) {
+            const token = oauthService.getToken();
+            if (token) setGhToken(token);
+        }
     }, []);
 
     // Resizing Logic
@@ -206,244 +229,331 @@ export default function App() {
         }
     };
 
+    // OAuth Handlers
+    const handleOAuthConnect = () => {
+        if (isOAuthConfigured()) {
+            setIsOAuthModalOpen(true);
+        } else {
+            alert('OAuth is not configured. Please set VITE_GITHUB_CLIENT_ID in your .env file.');
+        }
+    };
+
+    const handleOAuthAuthorize = async () => {
+        setIsOAuthLoading(true);
+        try {
+            await oauthService.initiateOAuth();
+        } catch (error: any) {
+            setErrorMsg(error.message);
+            setIsOAuthLoading(false);
+        }
+    };
+
+    const handleOAuthCancel = () => {
+        setIsOAuthModalOpen(false);
+    };
+
+    const showNotification = (type: NotificationType, message: string) => {
+        setNotificationType(type);
+        setNotificationMessage(message);
+        setNotificationVisible(true);
+    };
+
+    const handleOAuthDisconnect = () => {
+        oauthService.revokeToken();
+        setIsAuthenticated(false);
+        setGhToken('');
+        showNotification('info', 'Disconnected from GitHub. You can revoke app access in your GitHub settings.');
+    };
+
+    // Listen for OAuth success (from callback page)
+    useEffect(() => {
+        const checkAuthOnFocus = () => {
+            const wasAuthenticated = isAuthenticated;
+            const nowAuthenticated = oauthService.isAuthenticated();
+
+            if (!wasAuthenticated && nowAuthenticated) {
+                setIsAuthenticated(true);
+                const token = oauthService.getToken();
+                if (token) setGhToken(token);
+                showNotification('success', '✓ Successfully connected to GitHub!');
+                setIsOAuthModalOpen(false);
+            }
+        };
+
+        window.addEventListener('focus', checkAuthOnFocus);
+        return () => window.removeEventListener('focus', checkAuthOnFocus);
+    }, [isAuthenticated]);
+
     return (
-        <div className="flex flex-col h-screen w-full bg-black text-zinc-200 font-sans selection:bg-blue-500/30 selection:text-blue-100">
+        <>
+            <div className="flex flex-col h-screen w-full bg-black text-zinc-200 font-sans selection:bg-blue-500/30 selection:text-blue-100">
 
-            {/* --- Top Command Bar (Floating) --- */}
-            <div className="h-14 flex items-center px-6 z-50 shrink-0 bg-black/50 backdrop-blur-md border-b border-white/5">
-                {/* Logo */}
-                <div className="flex items-center gap-3 mr-8 group cursor-default">
-                    <div className="w-6 h-6 bg-gradient-to-br from-blue-600 to-indigo-600 rounded-md flex items-center justify-center shadow-[0_0_15px_rgba(37,99,235,0.5)] group-hover:shadow-[0_0_25px_rgba(37,99,235,0.8)] transition-all duration-500">
-                        <span className="text-xs font-bold text-white font-mono">S</span>
-                    </div>
-                    <span className="text-sm font-bold tracking-tight text-white">Sentinel</span>
-                </div>
-
-                {/* Repo Input */}
-                <div className="flex-1 max-w-xl relative group transition-all duration-300 focus-within:max-w-2xl">
-                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-zinc-500 group-focus-within:text-blue-400 transition-colors">
-                        <Icons.Github />
-                    </div>
-                    <input
-                        className="w-full bg-[#0f0f11] border border-[#27272a] rounded-lg pl-10 pr-4 py-2 text-xs text-zinc-200 focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/20 focus:outline-none placeholder-zinc-600 transition-all shadow-inner"
-                        placeholder="github_username/repo_name"
-                        value={repoUrl}
-                        onChange={(e) => setRepoUrl(e.target.value)}
-                        onKeyDown={(e) => e.key === 'Enter' && loadRepo()}
-                    />
-                </div>
-
-                {/* Token Input & Actions */}
-                <div className="ml-auto flex items-center gap-4">
-                    <input
-                        type="password"
-                        className="w-24 bg-transparent border-b border-zinc-800 focus:border-zinc-500 text-[10px] text-zinc-400 focus:text-zinc-200 focus:outline-none placeholder-zinc-700 text-center transition-colors"
-                        placeholder="GH_TOKEN"
-                        value={ghToken}
-                        onChange={(e) => setGhToken(e.target.value)}
-                    />
-
-                    {repoStructure && (
-                        <div
-                            className="flex items-center gap-2 cursor-pointer group"
-                            onClick={() => setDeepScanEnabled(!deepScanEnabled)}
-                        >
-                            <span className={`text-[10px] font-medium transition-colors ${deepScanEnabled ? 'text-blue-400' : 'text-zinc-500'}`}>DEEP SCAN</span>
-                            <div className={`w-8 h-4 rounded-full p-0.5 transition-colors duration-300 ${deepScanEnabled ? 'bg-blue-600 shadow-[0_0_10px_rgba(37,99,235,0.4)]' : 'bg-zinc-800'}`}>
-                                <div className={`w-3 h-3 bg-white rounded-full shadow transition-transform duration-300 ${deepScanEnabled ? 'translate-x-4' : 'translate-x-0'}`}></div>
-                            </div>
+                {/* --- Top Command Bar (Floating) --- */}
+                <div className="h-14 flex items-center px-6 z-50 shrink-0 bg-black/50 backdrop-blur-md border-b border-white/5">
+                    {/* Logo */}
+                    <div className="flex items-center gap-3 mr-8 group cursor-default">
+                        <div className="w-6 h-6 bg-gradient-to-br from-blue-600 to-indigo-600 rounded-md flex items-center justify-center shadow-[0_0_15px_rgba(37,99,235,0.5)] group-hover:shadow-[0_0_25px_rgba(37,99,235,0.8)] transition-all duration-500">
+                            <span className="text-xs font-bold text-white font-mono">S</span>
                         </div>
-                    )}
+                        <span className="text-sm font-bold tracking-tight text-white">Sentinel</span>
+                    </div>
 
-                    <button
-                        onClick={loadRepo}
-                        disabled={status === AnalysisStatus.LOADING_REPO}
-                        className="px-4 py-2 bg-white text-black hover:bg-zinc-200 disabled:opacity-50 disabled:cursor-not-allowed text-xs font-bold rounded shadow-[0_0_15px_rgba(255,255,255,0.1)] hover:shadow-[0_0_20px_rgba(255,255,255,0.3)] transition-all duration-300 transform hover:-translate-y-0.5 active:translate-y-0"
-                    >
-                        {status === AnalysisStatus.LOADING_REPO ? 'SYNCING...' : 'LOAD REPO'}
-                    </button>
-                </div>
-            </div>
-
-            {/* --- Main Interactive Workspace --- */}
-            <div className="flex-1 flex overflow-hidden relative">
-
-                {/* 1. Resizable Sidebar */}
-                <div style={{ width: sidebarWidth }} className="bg-[#050505] flex flex-col shrink-0 z-10 relative">
-                    {repoStructure ? (
-                        <RepoExplorer structure={repoStructure} onSelectPair={handleSelectPair} selectedPair={selectedPair} />
-                    ) : (
-                        <div className="flex-1 flex flex-col items-center justify-center text-zinc-700 p-8 text-center gap-4 opacity-50">
-                            <div className="w-16 h-16 border border-zinc-800 rounded-full flex items-center justify-center">
-                                <Icons.Github />
-                            </div>
-                            <p className="text-xs font-mono">Awaiting Repository Connection...</p>
+                    {/* Repo Input */}
+                    <div className="flex-1 max-w-xl relative group transition-all duration-300 focus-within:max-w-2xl">
+                        <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-zinc-500 group-focus-within:text-blue-400 transition-colors">
+                            <Icons.Github />
                         </div>
-                    )}
-                </div>
+                        <input
+                            className="w-full bg-[#0f0f11] border border-[#27272a] rounded-lg pl-10 pr-4 py-2 text-xs text-zinc-200 focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/20 focus:outline-none placeholder-zinc-600 transition-all shadow-inner"
+                            placeholder="github_username/repo_name"
+                            value={repoUrl}
+                            onChange={(e) => setRepoUrl(e.target.value)}
+                            onKeyDown={(e) => e.key === 'Enter' && loadRepo()}
+                        />
+                    </div>
 
-                {/* Drag Handle Left */}
-                <div className="resizer-col" onMouseDown={startResizing('left')}></div>
-
-                {/* 2. Main Editor Area */}
-                <div className="flex-1 flex flex-col min-w-0 bg-[#050505] relative">
-
-                    {/* Breadcrumb Bar */}
-                    <div className="h-10 flex items-center px-4 text-[10px] font-mono gap-2 border-b border-white/5 bg-black/40">
-                        {selectedPair ? (
-                            <>
-                                <span className="text-zinc-500">{repoStructure?.rootPackageName}</span>
-                                <span className="text-zinc-700">/</span>
-                                <span className="text-blue-400 font-bold">{selectedPair.name}.dart</span>
-                                {deepContext && <span className="ml-2 px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 animate-pulse">CONTEXT ACTIVE</span>}
-                            </>
+                    {/* Token Input & Actions */}
+                    <div className="ml-auto flex items-center gap-4">
+                        {/* OAuth Button (if configured) or Manual Token Input */}
+                        {isOAuthConfigured() ? (
+                            <OAuthButton
+                                isAuthenticated={isAuthenticated}
+                                onConnect={handleOAuthConnect}
+                                onDisconnect={handleOAuthDisconnect}
+                            />
                         ) : (
-                            <span className="text-zinc-600">Select a file to begin analysis</span>
+                            <input
+                                type="password"
+                                className="w-24 bg-transparent border-b border-zinc-800 focus:border-zinc-500 text-[10px] text-zinc-400 focus:text-zinc-200 focus:outline-none placeholder-zinc-700 text-center transition-colors"
+                                placeholder="GH_TOKEN"
+                                value={ghToken}
+                                onChange={(e) => setGhToken(e.target.value)}
+                            />
+                        )}
+
+                        {repoStructure && (
+                            <div
+                                className="flex items-center gap-2 cursor-pointer group"
+                                onClick={() => setDeepScanEnabled(!deepScanEnabled)}
+                            >
+                                <span className={`text-[10px] font-medium transition-colors ${deepScanEnabled ? 'text-blue-400' : 'text-zinc-500'}`}>DEEP SCAN</span>
+                                <div className={`w-8 h-4 rounded-full p-0.5 transition-colors duration-300 ${deepScanEnabled ? 'bg-blue-600 shadow-[0_0_10px_rgba(37,99,235,0.4)]' : 'bg-zinc-800'}`}>
+                                    <div className={`w-3 h-3 bg-white rounded-full shadow transition-transform duration-300 ${deepScanEnabled ? 'translate-x-4' : 'translate-x-0'}`}></div>
+                                </div>
+                            </div>
+                        )}
+
+                        <button
+                            onClick={loadRepo}
+                            disabled={status === AnalysisStatus.LOADING_REPO}
+                            className="px-4 py-2 bg-white text-black hover:bg-zinc-200 disabled:opacity-50 disabled:cursor-not-allowed text-xs font-bold rounded shadow-[0_0_15px_rgba(255,255,255,0.1)] hover:shadow-[0_0_20px_rgba(255,255,255,0.3)] transition-all duration-300 transform hover:-translate-y-0.5 active:translate-y-0"
+                        >
+                            {status === AnalysisStatus.LOADING_REPO ? 'SYNCING...' : 'LOAD REPO'}
+                        </button>
+                    </div>
+                </div>
+
+                {/* --- Main Interactive Workspace --- */}
+                <div className="flex-1 flex overflow-hidden relative">
+
+                    {/* 1. Resizable Sidebar */}
+                    <div style={{ width: sidebarWidth }} className="bg-[#050505] flex flex-col shrink-0 z-10 relative">
+                        {repoStructure ? (
+                            <RepoExplorer structure={repoStructure} onSelectPair={handleSelectPair} selectedPair={selectedPair} />
+                        ) : (
+                            <div className="flex-1 flex flex-col items-center justify-center text-zinc-700 p-8 text-center gap-4 opacity-50">
+                                <div className="w-16 h-16 border border-zinc-800 rounded-full flex items-center justify-center">
+                                    <Icons.Github />
+                                </div>
+                                <p className="text-xs font-mono">Awaiting Repository Connection...</p>
+                            </div>
                         )}
                     </div>
 
-                    {/* Split Code View */}
-                    <div className="flex-1 flex flex-col lg:flex-row p-1 gap-1 overflow-hidden">
-                        <div className="flex-1 h-full min-h-[300px] shadow-2xl shadow-black">
-                            <CodeEditor
-                                label="PRODUCTION CODE"
-                                value={prodCode}
-                                onChange={setProdCode}
-                                placeholder="// Select a file from sidebar"
-                                isScanning={status === AnalysisStatus.ANALYZING}
-                            />
-                        </div>
-                        <div className="flex-1 h-full min-h-[300px] shadow-2xl shadow-black">
-                            <CodeEditor
-                                label="UNIT TEST CODE"
-                                value={testCode}
-                                onChange={setTestCode}
-                                placeholder="// Test code will appear here"
-                                language="dart"
-                                readOnly={false}
-                            />
-                        </div>
-                    </div>
+                    {/* Drag Handle Left */}
+                    <div className="resizer-col" onMouseDown={startResizing('left')}></div>
 
-                    {/* Action Dock */}
-                    <div className="h-16 flex items-center justify-center shrink-0 bg-gradient-to-t from-black to-transparent px-4 absolute bottom-4 left-0 right-0 pointer-events-none">
-                        <div className="pointer-events-auto bg-[#0f0f11]/80 backdrop-blur-xl border border-white/10 rounded-full px-6 py-2 flex items-center gap-6 shadow-2xl transform hover:scale-105 transition-transform duration-300">
-                            <div className="text-xs flex items-center gap-3 min-w-[120px]">
-                                {status === AnalysisStatus.FETCHING_DEPS && <span className="text-amber-500 flex items-center gap-2"><span className="animate-spin">⟳</span> Resolving Context...</span>}
-                                {status === AnalysisStatus.ANALYZING && <span className="text-blue-400 flex items-center gap-2"><span className="w-2 h-2 bg-blue-400 rounded-full animate-ping"></span> Analyzing...</span>}
-                                {status === AnalysisStatus.IDLE && !errorMsg && <span className="text-zinc-500">Ready</span>}
-                                {errorMsg && <span className="text-red-400 font-bold">Error Detected</span>}
-                            </div>
+                    {/* 2. Main Editor Area */}
+                    <div className="flex-1 flex flex-col min-w-0 bg-[#050505] relative">
 
-                            <div className="h-6 w-px bg-white/10"></div>
-
-                            <button
-                                onClick={handleAnalyze}
-                                disabled={!prodCode || status === AnalysisStatus.ANALYZING}
-                                className="flex items-center gap-2 px-6 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-full text-xs font-bold transition-all shadow-[0_0_20px_rgba(37,99,235,0.4)] hover:shadow-[0_0_30px_rgba(37,99,235,0.6)] disabled:opacity-50 disabled:shadow-none"
-                            >
-                                <Icons.Play /> EXECUTE
-                            </button>
-                        </div>
-                    </div>
-                </div>
-
-                {/* Drag Handle Right */}
-                <div className="resizer-col" onMouseDown={startResizing('right')}></div>
-
-                {/* 3. Resizable Report Panel */}
-                <div style={{ width: reportWidth }} className="bg-[#050505] border-l border-white/5 flex flex-col shrink-0 z-10 overflow-hidden relative">
-                    {/* Panel Header */}
-                    <div className="h-10 flex items-center px-4 bg-black/20 border-b border-white/5">
-                        <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">Mission Report</span>
-                    </div>
-
-                    {!report ? (
-                        <div className="flex-1 flex flex-col items-center justify-center text-zinc-700 gap-2">
-                            <div className="w-20 h-20 rounded-full border-2 border-dashed border-zinc-800 flex items-center justify-center animate-pulse-slow">
-                                <span className="text-2xl opacity-20">⚡</span>
-                            </div>
-                            <span className="text-[10px] font-mono">System Idle</span>
-                        </div>
-                    ) : (
-                        <div className="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-6">
-
-                            {/* Score Visualization */}
-                            <div className="relative flex items-center justify-center py-4">
-                                <div className="w-32 h-32 relative">
-                                    <CoverageChart covered={report.testedFunctions} total={report.totalFunctions} />
-                                    <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-                                        <span className="text-3xl font-bold text-white drop-shadow-lg">{report.coveragePercentage}%</span>
-                                        <span className="text-[9px] text-zinc-500 uppercase">Coverage</span>
-                                    </div>
-                                </div>
-                            </div>
-
-                            {/* Summary */}
-                            <div className="bg-[#0f0f11] border border-[#27272a] rounded-lg p-3">
-                                <div className="text-[9px] text-blue-400 font-bold uppercase mb-2 flex items-center gap-2">
-                                    <span className="w-1 h-1 bg-blue-400 rounded-full"></span>
-                                    Static Analysis
-                                </div>
-                                <p className="text-[11px] leading-relaxed text-zinc-400">
-                                    {report.summary}
-                                </p>
-                            </div>
-
-                            {/* Interactive Function List */}
-                            <div className="space-y-2">
-                                <div className="flex items-center justify-between">
-                                    <span className="text-[9px] font-bold text-zinc-500 uppercase">Coverage Details</span>
-                                    <span className="text-[9px] text-zinc-600">{report.testedFunctions}/{report.totalFunctions} Passing</span>
-                                </div>
-                                <div className="space-y-1">
-                                    {report.functions.map((fn, i) => (
-                                        <FunctionReportCard key={i} fn={fn} index={i} />
-                                    ))}
-                                </div>
-                            </div>
-
-                            {/* Generation Actions */}
-                            {report.testedFunctions < report.totalFunctions && (
-                                <div className="pt-4 border-t border-white/5">
-                                    <button
-                                        onClick={handleGenerateTests}
-                                        disabled={status === AnalysisStatus.GENERATING_CODE}
-                                        className="w-full py-3 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-bold rounded-lg shadow-[0_0_15px_rgba(16,185,129,0.3)] transition-all flex items-center justify-center gap-2 disabled:opacity-50"
-                                    >
-                                        {status === AnalysisStatus.GENERATING_CODE ? 'SYNTHESIZING CODE...' : 'GENERATE MISSING TESTS'}
-                                    </button>
-
-                                    {generatedTests && (
-                                        <div className="mt-4 animate-in fade-in slide-in-from-bottom-4 duration-500">
-                                            <div className="flex justify-between items-center mb-2 px-1">
-                                                <span className="text-[10px] font-bold text-emerald-400 tracking-wide">GENERATED OUTPUT</span>
-                                                <button
-                                                    onClick={() => {
-                                                        const blob = new Blob([generatedTests.code], { type: 'text/plain' });
-                                                        const url = URL.createObjectURL(blob);
-                                                        const a = document.createElement('a'); a.href = url; a.download = 'test.dart';
-                                                        a.click();
-                                                    }}
-                                                    className="text-[9px] bg-emerald-900/30 px-2 py-1 rounded text-emerald-300 hover:bg-emerald-900/50 border border-emerald-900"
-                                                >
-                                                    DOWNLOAD .DART
-                                                </button>
-                                            </div>
-                                            <div className="p-3 bg-[#050505] border border-emerald-500/20 rounded-lg relative overflow-hidden group">
-                                                <div className="absolute top-0 left-0 w-1 h-full bg-emerald-500"></div>
-                                                <pre className="text-[10px] text-zinc-400 font-mono overflow-x-auto custom-scrollbar max-h-64">
-                                                    {generatedTests.code}
-                                                </pre>
-                                            </div>
-                                        </div>
-                                    )}
-                                </div>
+                        {/* Breadcrumb Bar */}
+                        <div className="h-10 flex items-center px-4 text-[10px] font-mono gap-2 border-b border-white/5 bg-black/40">
+                            {selectedPair ? (
+                                <>
+                                    <span className="text-zinc-500">{repoStructure?.rootPackageName}</span>
+                                    <span className="text-zinc-700">/</span>
+                                    <span className="text-blue-400 font-bold">{selectedPair.name}.dart</span>
+                                    {deepContext && <span className="ml-2 px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 animate-pulse">CONTEXT ACTIVE</span>}
+                                </>
+                            ) : (
+                                <span className="text-zinc-600">Select a file to begin analysis</span>
                             )}
                         </div>
-                    )}
+
+                        {/* Split Code View */}
+                        <div className="flex-1 flex flex-col lg:flex-row p-1 gap-1 overflow-hidden">
+                            <div className="flex-1 h-full min-h-[300px] shadow-2xl shadow-black">
+                                <CodeEditor
+                                    label="PRODUCTION CODE"
+                                    value={prodCode}
+                                    onChange={setProdCode}
+                                    placeholder="// Select a file from sidebar"
+                                    isScanning={status === AnalysisStatus.ANALYZING}
+                                />
+                            </div>
+                            <div className="flex-1 h-full min-h-[300px] shadow-2xl shadow-black">
+                                <CodeEditor
+                                    label="UNIT TEST CODE"
+                                    value={testCode}
+                                    onChange={setTestCode}
+                                    placeholder="// Test code will appear here"
+                                    language="dart"
+                                    readOnly={false}
+                                />
+                            </div>
+                        </div>
+
+                        {/* Action Dock */}
+                        <div className="h-16 flex items-center justify-center shrink-0 bg-gradient-to-t from-black to-transparent px-4 absolute bottom-4 left-0 right-0 pointer-events-none">
+                            <div className="pointer-events-auto bg-[#0f0f11]/80 backdrop-blur-xl border border-white/10 rounded-full px-6 py-2 flex items-center gap-6 shadow-2xl transform hover:scale-105 transition-transform duration-300">
+                                <div className="text-xs flex items-center gap-3 min-w-[120px]">
+                                    {status === AnalysisStatus.FETCHING_DEPS && <span className="text-amber-500 flex items-center gap-2"><span className="animate-spin">⟳</span> Resolving Context...</span>}
+                                    {status === AnalysisStatus.ANALYZING && <span className="text-blue-400 flex items-center gap-2"><span className="w-2 h-2 bg-blue-400 rounded-full animate-ping"></span> Analyzing...</span>}
+                                    {status === AnalysisStatus.IDLE && !errorMsg && <span className="text-zinc-500">Ready</span>}
+                                    {errorMsg && <span className="text-red-400 font-bold">Error Detected</span>}
+                                </div>
+
+                                <div className="h-6 w-px bg-white/10"></div>
+
+                                <button
+                                    onClick={handleAnalyze}
+                                    disabled={!prodCode || status === AnalysisStatus.ANALYZING}
+                                    className="flex items-center gap-2 px-6 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-full text-xs font-bold transition-all shadow-[0_0_20px_rgba(37,99,235,0.4)] hover:shadow-[0_0_30px_rgba(37,99,235,0.6)] disabled:opacity-50 disabled:shadow-none"
+                                >
+                                    <Icons.Play /> EXECUTE
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Drag Handle Right */}
+                    <div className="resizer-col" onMouseDown={startResizing('right')}></div>
+
+                    {/* 3. Resizable Report Panel */}
+                    <div style={{ width: reportWidth }} className="bg-[#050505] border-l border-white/5 flex flex-col shrink-0 z-10 overflow-hidden relative">
+                        {/* Panel Header */}
+                        <div className="h-10 flex items-center px-4 bg-black/20 border-b border-white/5">
+                            <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">Mission Report</span>
+                        </div>
+
+                        {!report ? (
+                            <div className="flex-1 flex flex-col items-center justify-center text-zinc-700 gap-2">
+                                <div className="w-20 h-20 rounded-full border-2 border-dashed border-zinc-800 flex items-center justify-center animate-pulse-slow">
+                                    <span className="text-2xl opacity-20">⚡</span>
+                                </div>
+                                <span className="text-[10px] font-mono">System Idle</span>
+                            </div>
+                        ) : (
+                            <div className="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-6">
+
+                                {/* Score Visualization */}
+                                <div className="relative flex items-center justify-center py-4">
+                                    <div className="w-32 h-32 relative">
+                                        <CoverageChart covered={report.testedFunctions} total={report.totalFunctions} />
+                                        <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+                                            <span className="text-3xl font-bold text-white drop-shadow-lg">{report.coveragePercentage}%</span>
+                                            <span className="text-[9px] text-zinc-500 uppercase">Coverage</span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* Summary */}
+                                <div className="bg-[#0f0f11] border border-[#27272a] rounded-lg p-3">
+                                    <div className="text-[9px] text-blue-400 font-bold uppercase mb-2 flex items-center gap-2">
+                                        <span className="w-1 h-1 bg-blue-400 rounded-full"></span>
+                                        Static Analysis
+                                    </div>
+                                    <p className="text-[11px] leading-relaxed text-zinc-400">
+                                        {report.summary}
+                                    </p>
+                                </div>
+
+                                {/* Interactive Function List */}
+                                <div className="space-y-2">
+                                    <div className="flex items-center justify-between">
+                                        <span className="text-[9px] font-bold text-zinc-500 uppercase">Coverage Details</span>
+                                        <span className="text-[9px] text-zinc-600">{report.testedFunctions}/{report.totalFunctions} Passing</span>
+                                    </div>
+                                    <div className="space-y-1">
+                                        {report.functions.map((fn, i) => (
+                                            <FunctionReportCard key={i} fn={fn} index={i} />
+                                        ))}
+                                    </div>
+                                </div>
+
+                                {/* Generation Actions */}
+                                {report.testedFunctions < report.totalFunctions && (
+                                    <div className="pt-4 border-t border-white/5">
+                                        <button
+                                            onClick={handleGenerateTests}
+                                            disabled={status === AnalysisStatus.GENERATING_CODE}
+                                            className="w-full py-3 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-bold rounded-lg shadow-[0_0_15px_rgba(16,185,129,0.3)] transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                                        >
+                                            {status === AnalysisStatus.GENERATING_CODE ? 'SYNTHESIZING CODE...' : 'GENERATE MISSING TESTS'}
+                                        </button>
+
+                                        {generatedTests && (
+                                            <div className="mt-4 animate-in fade-in slide-in-from-bottom-4 duration-500">
+                                                <div className="flex justify-between items-center mb-2 px-1">
+                                                    <span className="text-[10px] font-bold text-emerald-400 tracking-wide">GENERATED OUTPUT</span>
+                                                    <button
+                                                        onClick={() => {
+                                                            const blob = new Blob([generatedTests.code], { type: 'text/plain' });
+                                                            const url = URL.createObjectURL(blob);
+                                                            const a = document.createElement('a'); a.href = url; a.download = 'test.dart';
+                                                            a.click();
+                                                        }}
+                                                        className="text-[9px] bg-emerald-900/30 px-2 py-1 rounded text-emerald-300 hover:bg-emerald-900/50 border border-emerald-900"
+                                                    >
+                                                        DOWNLOAD .DART
+                                                    </button>
+                                                </div>
+                                                <div className="p-3 bg-[#050505] border border-emerald-500/20 rounded-lg relative overflow-hidden group">
+                                                    <div className="absolute top-0 left-0 w-1 h-full bg-emerald-500"></div>
+                                                    <pre className="text-[10px] text-zinc-400 font-mono overflow-x-auto custom-scrollbar max-h-64">
+                                                        {generatedTests.code}
+                                                    </pre>
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </div>
                 </div>
             </div>
-        </div>
+
+            {/* Notification */}
+            <OAuthNotification
+                type={notificationType}
+                message={notificationMessage}
+                isVisible={notificationVisible}
+                onClose={() => setNotificationVisible(false)}
+            />
+
+            {/* OAuth Modal */}
+            <OAuthModal isOpen={isOAuthModalOpen} onClose={handleOAuthCancel}>
+                <OAuthPanel
+                    appName="Flutter Test Coverage Sentinel"
+                    developerName="Sentinel Team"
+                    permissions={GITHUB_PERMISSIONS}
+                    metadata={APP_METADATA}
+                    onAuthorize={handleOAuthAuthorize}
+                    onCancel={handleOAuthCancel}
+                    isLoading={isOAuthLoading}
+                />
+            </OAuthModal>
+        </>
     );
 }

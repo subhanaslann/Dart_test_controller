@@ -73,3 +73,40 @@ export interface DeepAnalysisContext {
   dependencyCode: Record<string, string>; // filename -> content
   linterRules?: string;
 }
+
+// OAuth Types
+export interface OAuthConfig {
+  clientId: string;
+  redirectUri: string;
+  scope: string[];
+  authorizationUrl: string;
+  tokenUrl: string;
+}
+
+export interface Permission {
+  name: string;
+  description: string;
+  isReadOnly: boolean;
+  icon?: string;
+}
+
+export interface AppMetadata {
+  isGitHubOwned: boolean;
+  createdDate: string;
+  userCount: string;
+}
+
+export interface AuthState {
+  isAuthenticated: boolean;
+  token: string | null;
+  user: GitHubUser | null;
+  isLoading: boolean;
+  error: string | null;
+}
+
+export interface GitHubUser {
+  login: string;
+  name: string;
+  avatar_url: string;
+  email: string;
+}
