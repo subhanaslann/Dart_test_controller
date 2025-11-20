@@ -9,12 +9,15 @@
 
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 
-export default async function handler(req: VercelRequest, res: VercelResponse) {
-    // Only allow POST requests
-    if (req.method !== 'POST') {
-        return res.status(405).json({ error: 'Method not allowed' });
-    }
+interface GitHubTokenResponse {
+    access_token?: string;
+    token_type?: string;
+    scope?: string;
+    error?: string;
+    error_description?: string;
+}
 
+export default async function handler(req: VercelRequest, res: VercelResponse) {
     // Enable CORS
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -23,6 +26,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // Handle preflight
     if (req.method === 'OPTIONS') {
         return res.status(200).end();
+    }
+
+    // Only allow POST requests
+    if (req.method !== 'POST') {
+        return res.status(405).json({ error: 'Method not allowed' });
     }
 
     try {
@@ -71,7 +79,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             });
         }
 
-        const tokenData = await tokenResponse.json();
+        const tokenData = await tokenResponse.json() as GitHubTokenResponse;
 
         // Check for errors in GitHub response
         if (tokenData.error) {
