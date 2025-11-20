@@ -1,5 +1,5 @@
 {
   "name": "Flutter Test Coverage Sentinel",
-  "description": "A smart tool for Flutter developers to analyze production code against test files, identifying missing unit tests and generating test scaffolding using Gemini AI.",
+  "description": "A fast static analysis tool for Flutter developers to analyze production code against test files, identifying missing unit tests and generating test scaffolding without AI.",
   "requestFramePermissions": []
 }
